@@ -3,7 +3,7 @@
 Crea `servidor_iphone.py`: un programa para Windows que corre en la PC y sirve, en la red local, una página web para el iPhone con video y controles de movimiento. Interfaz en español. Sin anuncios ni telemetría ni recursos externos. Solo biblioteca estándar más `av` (PyAV) y numpy. Python: `%TEMP%\vc\venv\Scripts\python.exe`. No instales nada. No modifiques `visor_camara.py`.
 
 ## Cámara
-- IP: lee `ip` de `%APPDATA%\CamaraWifi\config.json` si existe; si no, `192.168.1.100`. Sin contraseña. `--ip` la sustituye. Si el RTSP falla, reintenta y vuelve a leer ese archivo.
+- IP: usa `--ip` o `ip` de `%APPDATA%\CamaraWifi\config.json`; si no existe, `192.168.1.100`. Sin contraseña. Si no conecta, busca la cámara por ONVIF.
 - Video: `rtsp://<ip>:554/0/av1` (baja, por defecto) y `rtsp://<ip>:554/0/av0` (alta). H.265.
 - Opciones de `av.open`: `rtsp_transport=tcp, fflags=nobuffer, flags=low_delay, max_delay=0, timeout=5000000, analyzeduration=0, probesize=32768`, con `timeout=(5, 5)`.
 - Movimiento: POST SOAP 1.2 a `http://<ip>/onvif/PTZ`, `Content-Type: application/soap+xml; charset=utf-8`, sobre `<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"><s:Body xmlns:t="http://www.onvif.org/ver20/ptz/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema">...</s:Body></s:Envelope>`.
@@ -11,7 +11,7 @@ Crea `servidor_iphone.py`: un programa para Windows que corre en la PC y sirve, 
   - Parar: `<t:Stop><t:ProfileToken>Profile_1</t:ProfileToken><t:PanTilt>true</t:PanTilt><t:Zoom>true</t:Zoom></t:Stop>`. Reintenta hasta 3 veces.
 
 ## Servidor
-- `ThreadingHTTPServer` en `0.0.0.0`, puerto 8765 (`--puerto`). Al arrancar imprime en consola la dirección `http://<ip-local>:8765` para el iPhone (IP de la interfaz con salida a la red) y "Cierra esta ventana para detener". Protege los `print` por si `sys.stdout` es None. Silencia el log por petición.
+- `ThreadingHTTPServer` en `0.0.0.0`, puerto 8770 (`--puerto`). Al arrancar imprime en consola la dirección `http://<ip-local>:8770` para el iPhone (IP de la interfaz con salida a la red) y "Cierra esta ventana para detener". Protege los `print` por si `sys.stdout` es None. Silencia el log por petición.
 - `GET /`: la página, HTML/CSS/JS en línea dentro del .py.
 - `GET /stream?calidad=baja|alta`: `multipart/x-mixed-replace` con JPEG. Un único hilo por calidad decodifica RTSP y codifica a JPEG con `av.CodecContext.create("mjpeg", "w")` (formato yuvj420p, calidad razonable), y guarda solo el último JPEG; cada cliente envía siempre el más reciente, sin acumular atraso. Si no hay clientes de esa calidad durante 5 s, cierra la conexión RTSP y deja de consumir CPU. Reconecta sola con espera creciente de 1 a 10 s. Maneja la desconexión del cliente sin trazas de error. La resolución alta se mantiene: no reescales.
 - `GET /estado`: JSON con `conectado`, `segundos_desde_ultimo_fotograma`, `calidad_activa`, `ultimo_error`, `movimiento_activo`.

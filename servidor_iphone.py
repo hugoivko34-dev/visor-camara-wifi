@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import os
 import socket
@@ -11,6 +12,8 @@ import sys
 import threading
 import time
 import urllib.request
+import re
+import xml.etree.ElementTree as ET
 import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -243,13 +246,164 @@ def say(*values):
         pass
 
 
-def config_ip():
+def load_camera_ip():
     path = Path(os.environ.get("APPDATA", str(Path.home()))) / "CamaraWifi" / "config.json"
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
         return str(value.get("ip") or DEFAULT_IP) if isinstance(value, dict) else DEFAULT_IP
     except (OSError, ValueError, TypeError):
         return DEFAULT_IP
+
+
+camera_ip_lock = threading.Lock()
+camera_ip = load_camera_ip()
+discovery_lock = threading.Lock()
+last_discovery = time.monotonic() - 15
+
+
+def get_camera_ip():
+    with camera_ip_lock:
+        return camera_ip
+
+
+def set_camera_ip(ip):
+    global camera_ip
+    with camera_ip_lock:
+        camera_ip = ip
+
+
+def save_camera_ip(ip):
+    path = Path(os.environ.get("APPDATA", str(Path.home()))) / "CamaraWifi" / "config.json"
+    try:
+        try:
+            config = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(config, dict):
+                config = {}
+        except (OSError, ValueError, TypeError):
+            config = {}
+        if config.get("ip") == ip:
+            return
+        config["ip"] = ip
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def discover_camera(timeout=3.5):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    try:
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
+        start = time.monotonic()
+        end = start + min(timeout, 3.5)
+        next_probe = start
+        probes_sent = 0
+        while time.monotonic() < end:
+            now = time.monotonic()
+            if probes_sent < 4 and now >= next_probe:
+                message_id = "uuid:" + os.urandom(16).hex()
+                probe = (f'<e:Envelope xmlns:e="http://www.w3.org/2003/05/soap-envelope" '
+                         'xmlns:w="http://schemas.xmlsoap.org/ws/2004/08/addressing" '
+                         'xmlns:d="http://schemas.xmlsoap.org/ws/2005/04/discovery" '
+                         'xmlns:dn="http://www.onvif.org/ver10/network/wsdl">'
+                         '<e:Header><w:MessageID>' + message_id + '</w:MessageID>'
+                         '<w:To>urn:schemas-xmlsoap-org:ws:2005:04:discovery</w:To>'
+                         '<w:Action>http://schemas.xmlsoap.org/ws/2005/04/discovery/Probe</w:Action>'
+                         '</e:Header><e:Body><d:Probe><d:Types>dn:NetworkVideoTransmitter</d:Types>'
+                         '</d:Probe></e:Body></e:Envelope>').encode()
+                sock.sendto(probe, ("239.255.255.250", 3702))
+                probes_sent += 1
+                next_probe = start + probes_sent * 0.6
+            sock.settimeout(max(0.01, min(0.2, end - time.monotonic(), next_probe - time.monotonic()
+                                         if probes_sent < 4 else end - time.monotonic())))
+            try:
+                data, peer = sock.recvfrom(65535)
+            except socket.timeout:
+                continue
+            try:
+                root = ET.fromstring(data)
+                if "NetworkVideoTransmitter" not in data.decode("utf-8", "ignore"):
+                    continue
+                for elem in root.iter():
+                    if elem.tag.endswith("XAddrs") and elem.text:
+                        for address in re.findall(r"https?://([^/:]+)", elem.text):
+                            try:
+                                return socket.gethostbyname(address)
+                            except OSError:
+                                pass
+                return peer[0]
+            except ET.ParseError:
+                continue
+    except OSError:
+        pass
+    finally:
+        sock.close()
+    return None
+
+
+def scan_for_camera():
+    try:
+        own_ip = local_ip()
+        if own_ip == "127.0.0.1":
+            return None
+        subnet = ".".join(own_ip.split(".")[:3])
+        addresses = [f"{subnet}.{host}" for host in range(1, 255)
+                     if f"{subnet}.{host}" != own_ip]
+
+        def check(ip):
+            try:
+                with socket.create_connection((ip, 554), timeout=1.0) as conn:
+                    conn.settimeout(1.5)
+                    conn.sendall(f"OPTIONS rtsp://{ip}:554/ RTSP/1.0\r\nCSeq: 1\r\n\r\n".encode())
+                    return ip if conn.recv(1024).startswith(b"RTSP/1.0") else None
+            except Exception:
+                return None
+
+        with ThreadPoolExecutor(max_workers=64) as executor:
+            futures = [executor.submit(check, ip) for ip in addresses]
+            for future in as_completed(futures):
+                found = future.result()
+                if found:
+                    for pending in futures:
+                        pending.cancel()
+                    return found
+    except Exception:
+        return None
+    return None
+
+
+def find_camera():
+    return discover_camera() or scan_for_camera()
+
+
+def camera_port_responds(ip):
+    try:
+        with socket.create_connection((ip, 554), timeout=1.5):
+            return True
+    except Exception:
+        return False
+
+
+def discover_camera_if_due():
+    global last_discovery
+    if camera_port_responds(get_camera_ip()):
+        return None
+    with discovery_lock:
+        now = time.monotonic()
+        if now - last_discovery < 15:
+            return None
+        last_discovery = now
+    found = find_camera()
+    if not found or found == get_camera_ip():
+        return None
+    set_camera_ip(found)
+    save_camera_ip(found)
+    say(f"Cámara encontrada en {found}")
+    for stream in streams.values():
+        stream.reconnect.set()
+        with stream.lock:
+            stream.lock.notify_all()
+    return found
 
 
 def local_ip():
@@ -287,6 +441,7 @@ class Stream:
         self.connected = False
         self.active = False
         self.stop = threading.Event()
+        self.reconnect = threading.Event()
         self.thread = threading.Thread(target=self.run, daemon=True)
         self.thread.start()
 
@@ -325,7 +480,7 @@ class Stream:
                     "probesize": "32768",
                 }
                 container = av.open(
-                    f"rtsp://{config_ip()}:554{URLS[self.quality]}",
+                    f"rtsp://{get_camera_ip()}:554{URLS[self.quality]}",
                     options=options,
                     timeout=(5, 5),
                 )
@@ -344,6 +499,9 @@ class Stream:
 
                 idle_since = None
                 for packet in container.demux(stream):
+                    if self.reconnect.is_set():
+                        self.reconnect.clear()
+                        break
                     with self.lock:
                         if self.clients == 0:
                             if idle_since is None:
@@ -372,6 +530,8 @@ class Stream:
             except Exception as exc:
                 with self.lock:
                     self.error = str(exc)
+                if not self.stop.is_set():
+                    discover_camera_if_due()
             finally:
                 if container is not None:
                     try:
@@ -388,7 +548,10 @@ class Stream:
             with self.lock:
                 if self.clients == 0:
                     continue
-            self.stop.wait(delay)
+            if self.reconnect.wait(delay):
+                self.reconnect.clear()
+                delay = 1
+                continue
             delay = min(delay + 1, 10)
 
     def status(self):
@@ -398,6 +561,7 @@ class Stream:
             "segundos_desde_ultimo_fotograma": age,
             "calidad_activa": bool(self.active),
             "ultimo_error": self.error,
+            "ip_camara": get_camera_ip(),
         }
 
 
@@ -428,7 +592,7 @@ def soap(move=None, timeout=3):
         + body + '</s:Body></s:Envelope>'
     ).encode()
     request = urllib.request.Request(
-        f"http://{config_ip()}/onvif/PTZ",
+        f"http://{get_camera_ip()}/onvif/PTZ",
         data=envelope,
         headers={"Content-Type": "application/soap+xml; charset=utf-8"},
         method="POST",
@@ -479,6 +643,11 @@ def ptz_worker():
 
 
 threading.Thread(target=ptz_worker, daemon=True).start()
+
+
+class ExclusiveHTTPServer(ThreadingHTTPServer):
+    # En Windows, SO_REUSEADDR deja que dos programas abran el mismo puerto sin error.
+    allow_reuse_address = False
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -609,7 +778,7 @@ def prueba(seconds):
                 "max_delay": "0", "timeout": "5000000", "analyzeduration": "0",
                 "probesize": "32768",
             }
-            container = av.open(f"rtsp://{config_ip()}:554{URLS['baja']}",
+            container = av.open(f"rtsp://{get_camera_ip()}:554{URLS['baja']}",
                                 options=options, timeout=(5, 5))
             stream = container.streams.video[0]
             codec = av.CodecContext.create("mjpeg", "w")
@@ -650,21 +819,29 @@ def console_control_handler(control_type):
     return False
 
 
+def camera_watchdog():
+    while not shutdown.is_set():
+        try:
+            if not camera_port_responds(get_camera_ip()):
+                discover_camera_if_due()
+        except Exception:
+            pass
+        shutdown.wait(30)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--ip")
-    parser.add_argument("--puerto", type=int, default=8765)
+    parser.add_argument("--puerto", type=int, default=8770)
     parser.add_argument("--prueba", type=float)
     args = parser.parse_args()
-    global config_ip
     if args.ip:
-        selected_ip = args.ip
-        config_ip = lambda: selected_ip
+        set_camera_ip(args.ip)
     if args.prueba is not None:
         return prueba(max(0, args.prueba))
 
     try:
-        server = ThreadingHTTPServer(("0.0.0.0", args.puerto), Handler)
+        server = ExclusiveHTTPServer(("0.0.0.0", args.puerto), Handler)
     except OSError as exc:
         if getattr(exc, "winerror", None) == 10048 or getattr(exc, "errno", None) in (48, 98, 10048):
             say(f"El puerto {args.puerto} ya está en uso: quizá el servidor ya esté abierto")
@@ -684,6 +861,7 @@ def main():
     say("Abre esta dirección en Safari en tu iPhone, conectado a este mismo wifi:")
     say(address)
     say("Cierra esta ventana para detener")
+    threading.Thread(target=camera_watchdog, daemon=True).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
