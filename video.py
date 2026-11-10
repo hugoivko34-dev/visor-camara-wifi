@@ -287,7 +287,7 @@ def iniciar_grabacion(segundos, calidad):
         rec = {"archivo": str(carpeta_clips() / name), "nombre": name, "quality": calidad, "segundos": segundos,
                "inicio": time.monotonic(), "done": False, "cerrado": False, "lock": threading.Lock(),
                "out": None, "vout": None, "aout": None, "resampler": None, "last_dts": None,
-               "audio_buffer": bytearray(), "audio_pts": 0, "video_packets": 0, "error": None}
+               "audio_buffer": bytearray(), "audio_pts": 0, "video_packets": 0, "error": None, "base_dts": None}
         _recording = rec
         threading.Thread(target=_finish_recording, args=(rec,), daemon=True).start()
         _streams[calidad].lock.acquire()
@@ -296,12 +296,16 @@ def iniciar_grabacion(segundos, calidad):
         return name
 
 
-def _mux_conservando_tiempos(out, packet, vout):
+def _mux_conservando_tiempos(out, packet, vout, desplazamiento=0):
+    """Muxea el paquete y deja intactos su stream y sus marcas de tiempo para los demás consumidores."""
     pts, dts = packet.pts, packet.dts
     time_base = packet.time_base
     stream_original = packet.stream
     packet.stream = vout
     try:
+        if desplazamiento:
+            packet.dts = dts - desplazamiento
+            packet.pts = (pts if pts is not None else dts) - desplazamiento
         out.mux(packet)
     finally:
         packet.stream = stream_original
@@ -338,7 +342,9 @@ def _record_video(quality, packet):
                 rec["resampler"] = av.AudioResampler(format="fltp", layout="mono", rate=8000)
             if packet.pts is None:
                 packet.pts = packet.dts
-            _mux_conservando_tiempos(rec["out"], packet, rec["vout"])
+            if rec["base_dts"] is None:
+                rec["base_dts"] = min(packet.dts, packet.pts)
+            _mux_conservando_tiempos(rec["out"], packet, rec["vout"], rec["base_dts"])
             rec["last_dts"] = packet.dts
             rec["video_packets"] += 1
             if packet.is_keyframe and time.monotonic() - rec["inicio"] >= rec["segundos"]:
@@ -379,34 +385,37 @@ def _finish_recording(rec):
     while not rec["done"] and time.monotonic() - rec["inicio"] < rec["segundos"] + 3:
         time.sleep(0.25)
     rec["done"] = True
-    with rec["lock"]:
-        rec["cerrado"] = True
-        out = rec["out"]
-        try:
-            if out is not None:
-                if rec["aout"] is not None:
-                    try:
-                        for packet in rec["aout"].encode(None):
-                            out.mux(packet)
-                    except Exception:
-                        pass
-                out.close()
-        except Exception:
-            rec["error"] = (rec["error"] or "") + traceback.format_exc()
     try:
-        if rec["error"]:
-            raise RuntimeError(rec["error"].strip().splitlines()[-1])
-        if out is None or not rec["video_packets"]:
-            raise RuntimeError("La grabación no recibió video")
-        with av.open(rec["archivo"]) as check:
-            if not check.streams.video or not check.duration:
-                raise RuntimeError("El clip no tiene duración")
-    except Exception as exc:
+        with rec["lock"]:
+            out = rec["out"]
+            try:
+                if out is not None:
+                    if rec["aout"] is not None:
+                        try:
+                            for packet in rec["aout"].encode(None):
+                                out.mux(packet)
+                        except Exception:
+                            pass
+                    out.close()
+            except Exception:
+                rec["error"] = (rec["error"] or "") + traceback.format_exc()
         try:
-            Path(rec["archivo"]).unlink(missing_ok=True)
-        except OSError:
-            pass
-        _write_log(f"Error al finalizar grabación: {exc}")
+            if rec["error"]:
+                raise RuntimeError(rec["error"].strip().splitlines()[-1])
+            if out is None or not rec["video_packets"]:
+                raise RuntimeError("La grabación no recibió video")
+            with av.open(rec["archivo"]) as check:
+                if not check.streams.video or not check.duration:
+                    raise RuntimeError("El clip no tiene duración")
+        except Exception as exc:
+            try:
+                Path(rec["archivo"]).unlink(missing_ok=True)
+            except OSError:
+                pass
+            _write_log(f"Error al finalizar grabación: {exc}")
+    finally:
+        # Solo ahora el clip deja de figurar como "grabando": el archivo ya está cerrado y verificado.
+        rec["cerrado"] = True
 
 
 def detener_grabacion():
