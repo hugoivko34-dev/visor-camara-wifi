@@ -122,8 +122,7 @@ class Stream:
                             with self.lock:
                                 qs = {q for q, count in _client_qualities(self) if count}
                             for q in qs:
-                                ctx = _jpeg_encoder(q, frame.width, frame.height)
-                                jpg = b"".join(bytes(p) for p in ctx.encode(frame.reformat(format="yuvj420p")))
+                                jpg = _codificar_jpeg(q, frame)
                                 if jpg:
                                     with self.lock:
                                         self.jpegs[q] = (jpg, self.sequence + 1)
@@ -184,6 +183,34 @@ def _jpeg_encoder(q, width, height):
         cache[key] = ctx
         _jpeg_encoder.cache = cache
     return cache[key]
+
+
+_jpeg_lock = threading.Lock()
+_jpeg_pts = {}
+
+
+def _codificar_jpeg(q, frame):
+    """Codifica un fotograma a JPEG sin que una reconexión rompa el codificador.
+
+    El codificador de FFmpeg rechaza para siempre un fotograma cuya marca de tiempo no supere
+    a la anterior, y al reconectar la cámara las marcas vuelven a empezar. Por eso cada
+    codificador lleva su propio contador y, si aun así falla, se descarta y se crea otro.
+    """
+    key = (q, frame.width, frame.height)
+    imagen = frame.reformat(format="yuvj420p")
+    for intento in range(2):
+        with _jpeg_lock:
+            ctx = _jpeg_encoder(q, frame.width, frame.height)
+            _jpeg_pts[key] = _jpeg_pts.get(key, 0) + 1
+            imagen.pts = _jpeg_pts[key]
+            try:
+                return b"".join(bytes(p) for p in ctx.encode(imagen))
+            except av.error.FFmpegError as exc:
+                getattr(_jpeg_encoder, "cache", {}).pop(key, None)
+                _jpeg_pts.pop(key, None)
+                if intento:
+                    _write_log(f"No se pudo codificar JPEG q={q}: {exc}")
+    return None
 
 
 for _quality in URLS:

@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import os
+import select
 import socket
 import struct
 import subprocess
@@ -286,6 +287,18 @@ def ptz_worker():
 threading.Thread(target=ptz_worker, daemon=True).start()
 
 
+def cliente_desconectado(conexion):
+    """True si el navegador cerró la conexión. Sin esto, un video detenido nunca escribe
+    y el servidor sigue contando como clientes a los iPhone que ya se fueron."""
+    try:
+        legible, _, _ = select.select([conexion], [], [], 0)
+        if not legible:
+            return False
+        return conexion.recv(1, socket.MSG_PEEK) == b""
+    except (OSError, ValueError):
+        return True
+
+
 class ExclusiveHTTPServer(ThreadingHTTPServer):
     # En Windows, SO_REUSEADDR deja que dos programas abran el mismo puerto sin error.
     allow_reuse_address = False
@@ -397,7 +410,9 @@ class Handler(BaseHTTPRequestHandler):
                     with stream.lock:
                         stream.lock.wait_for(lambda: (q in stream.jpegs and stream.jpegs[q][1] > seen) or shutdown.is_set(), timeout=5)
                         jpg, sequence = stream.jpegs.get(q, (None, seen))
-                    if jpg:
+                    if sequence == seen and cliente_desconectado(self.connection):
+                        break
+                    if jpg and sequence != seen:
                         now = time.monotonic()
                         if fps and now - last_sent < 1 / fps:
                             seen = sequence
