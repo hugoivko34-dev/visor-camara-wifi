@@ -8,6 +8,7 @@ import json
 import os
 import socket
 import struct
+import subprocess
 import sys
 import threading
 import time
@@ -575,6 +576,119 @@ move_start = 0.0
 ptz_error = ""
 shutdown = threading.Event()
 
+STOP_EVENT_NAME = "Local\\ServidorIphoneDetener"
+MUTEX_NAME = "Local\\ServidorIphoneCamara"
+ERROR_ALREADY_EXISTS = 183
+LOG_PATH = Path(os.environ.get("APPDATA", str(Path.home()))) / "CamaraWifi" / "servidor.log"
+_kernel32 = ctypes.WinDLL("kernel32", use_last_error=True) if os.name == "nt" else None
+
+
+def open_stop_event():
+    if os.name != "nt":
+        return None
+    _kernel32.CreateEventW.restype = ctypes.c_void_p
+    _kernel32.CreateEventW.argtypes = (ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_wchar_p)
+    return _kernel32.CreateEventW(None, True, False, STOP_EVENT_NAME)
+
+
+def signal_stop():
+    handle = open_stop_event()
+    if handle:
+        try:
+            _kernel32.SetEvent(ctypes.c_void_p(handle))
+        finally:
+            _kernel32.CloseHandle(ctypes.c_void_p(handle))
+
+
+def write_log(message):
+    try:
+        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with LOG_PATH.open("a", encoding="utf-8") as log:
+            log.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {message}\n")
+    except OSError:
+        pass
+
+
+def prepare_log():
+    try:
+        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        if LOG_PATH.exists() and LOG_PATH.stat().st_size > 1024 * 1024:
+            old = LOG_PATH.with_name("servidor.log.1")
+            if old.exists():
+                old.unlink()
+            LOG_PATH.replace(old)
+        return LOG_PATH.open("a", encoding="utf-8", buffering=1)
+    except OSError:
+        return open(os.devnull, "a", encoding="utf-8")
+
+
+def stop_server_on_event():
+    handle = open_stop_event()
+    if not handle:
+        return
+    if _kernel32.WaitForSingleObject(ctypes.c_void_p(handle), 0xFFFFFFFF) == 0:
+        try:
+            soap(None, timeout=.35)
+        finally:
+            os._exit(0)
+
+
+def run_watcher(ip, port):
+    _kernel32.CreateMutexW.restype = ctypes.c_void_p
+    _kernel32.CreateMutexW.argtypes = (ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p)
+    mutex = _kernel32.CreateMutexW(None, False, MUTEX_NAME)
+    if not mutex:
+        return 0
+    if ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
+        _kernel32.CloseHandle(ctypes.c_void_p(mutex))
+        return 0
+    event = open_stop_event()
+    if not event:
+        _kernel32.CloseHandle(ctypes.c_void_p(mutex))
+        return 0
+    log = prepare_log()
+    _kernel32.ResetEvent(ctypes.c_void_p(event))
+    wait_seconds = 2
+    child = None
+    child_started = 0
+    try:
+        while True:
+            try:
+                if _kernel32.WaitForSingleObject(ctypes.c_void_p(event), 0) == 0:
+                    if child is not None and child.poll() is None:
+                        try:
+                            child.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            child.terminate()
+                    return 0
+                if child is None:
+                    command = ([sys.executable, "--servidor"] if getattr(sys, "frozen", False)
+                               else [sys.executable, __file__, "--servidor"])
+                    if ip:
+                        command.extend(["--ip", ip])
+                    command.extend(["--puerto", str(port)])
+                    child = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                                             creationflags=subprocess.CREATE_NO_WINDOW)
+                    child_started = time.monotonic()
+                if _kernel32.WaitForSingleObject(ctypes.c_void_p(event), 250) == 0:
+                    continue
+                code = child.poll()
+                if code is not None:
+                    lived = time.monotonic() - child_started
+                    write_log(f"Servidor terminó con código {code}")
+                    child = None
+                    wait_seconds = min(30, wait_seconds * 2) if lived < 30 else 2
+                    if _kernel32.WaitForSingleObject(ctypes.c_void_p(event), int(wait_seconds * 1000)) == 0:
+                        continue
+            except Exception as exc:
+                write_log(f"Error del vigilante: {exc!r}")
+                if _kernel32.WaitForSingleObject(ctypes.c_void_p(event), 1000) == 0:
+                    continue
+    finally:
+        log.close()
+        _kernel32.CloseHandle(ctypes.c_void_p(event))
+        _kernel32.CloseHandle(ctypes.c_void_p(mutex))
+
 
 def soap(move=None, timeout=3):
     global ptz_error
@@ -830,25 +944,40 @@ def camera_watchdog():
 
 
 def main():
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w")
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w")
     parser = argparse.ArgumentParser()
     parser.add_argument("--ip")
     parser.add_argument("--puerto", type=int, default=8770)
     parser.add_argument("--prueba", type=float)
+    parser.add_argument("--servidor", action="store_true")
+    parser.add_argument("--detener", action="store_true")
     args = parser.parse_args()
+    if args.detener:
+        signal_stop()
+        return 0
+    if os.name == "nt" and args.prueba is None and not args.servidor:
+        return run_watcher(args.ip, args.puerto)
     if args.ip:
         set_camera_ip(args.ip)
     if args.prueba is not None:
         return prueba(max(0, args.prueba))
+
+    if os.name == "nt":
+        threading.Thread(target=stop_server_on_event, daemon=True).start()
 
     try:
         server = ExclusiveHTTPServer(("0.0.0.0", args.puerto), Handler)
     except OSError as exc:
         if getattr(exc, "winerror", None) == 10048 or getattr(exc, "errno", None) in (48, 98, 10048):
             say(f"El puerto {args.puerto} ya está en uso: quizá el servidor ya esté abierto")
-            try:
-                input("Presiona Enter para salir")
-            except (EOFError, OSError):
-                pass
+            if sys.stdin is not None and sys.stdin.isatty():
+                try:
+                    input("Presiona Enter para salir")
+                except (EOFError, OSError):
+                    pass
             return 1
         raise
     server.daemon_threads = True

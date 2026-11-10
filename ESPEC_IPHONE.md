@@ -33,3 +33,5 @@ Crea `servidor_iphone.py`: un programa para Windows que corre en la PC y sirve, 
 `--prueba SEGUNDOS`: sin abrir el puerto HTTP, decodifica la calidad baja durante ese tiempo y codifica JPEG. Imprime JSON con `fotogramas`, `bytes_jpeg_ultimo`, `error`. Sale con 0 si hubo fotogramas.
 
 No ejecutes nada que envíe órdenes de movimiento a la cámara. Comprueba con py_compile y, si tienes red, con `--prueba 6`. Responde en pocas líneas.
+
+El servidor corre sin ventana, se reabre solo si se cierra y se detiene con `--detener`.

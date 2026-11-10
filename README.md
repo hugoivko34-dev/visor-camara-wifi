@@ -30,3 +30,5 @@ La IP de ejemplo es `192.168.1.100`. Para usar la tuya:
 - Acceso desde fuera de casa por VPN.
 - Correr el servidor en un equipo siempre encendido, sin depender de la PC.
 - Sonido en el iPhone y menor consumo de datos, reenviando el video sin convertirlo.
+
+El servidor corre sin ventana, se reabre solo si se cierra y se detiene con `servidor_iphone.py --detener`.
