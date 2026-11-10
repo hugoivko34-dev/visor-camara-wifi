@@ -1,34 +1,48 @@
 # Visor de cámara WiFi
 
-Alternativa sin anuncios a la app YCC365 Plus, para ver y mover una cámara con RTSP y ONVIF. Funciona en la red local y no usa la nube del fabricante.
+Alternativa sin anuncios a la app YCC365 Plus para una cámara con RTSP y ONVIF. Todo corre en tu red local y en tu PC: nada pasa por la nube del fabricante.
 
-- `visor_camara.py`: programa de Windows con video, sonido, fotos y control de movimiento.
-- `servidor_iphone.py`: servidor que corre en la PC y ofrece al iPhone una página con video y flechas de movimiento, en el puerto 8770.
-- `construir.bat`: genera los ejecutables en `dist\`. Usa un entorno de Python en `%TEMP%\vc`, porque las rutas largas rompen la carga de algunas DLL.
-- `ESPEC.md` y `ESPEC_IPHONE.md`: especificaciones originales.
+## Qué incluye
 
-## Configurar la cámara
-La IP de ejemplo es `192.168.1.100`. Para usar la tuya:
+- **Panel de cámara** (`servidor_iphone.py` + `panel/`): página web servida por la PC, pensada para el iPhone y usable desde cualquier navegador. Es la interfaz principal.
+- **Visor de Windows** (`visor_camara.py`): programa de escritorio con video, sonido, fotos y control de movimiento.
+- `camara.py`: ONVIF (movimiento, información, hora, reinicio) y búsqueda de la cámara en la red.
+- `video.py`: conexión RTSP compartida, MJPEG, audio, HLS, fotos y clips.
+- `construir.bat`: genera los ejecutables en `dist\` con PyInstaller, usando un entorno de Python en `%TEMP%\vc` (las rutas largas rompen la carga de algunas DLL).
+- `ESPEC*.md`: especificaciones con las que se construyó cada parte.
 
-- En el visor, pulsa **Cámara** y escríbela. También intenta encontrarla sola por ONVIF si no conecta.
-- El servidor usa `--ip` o la IP guardada por el visor. Si no conecta, busca la cámara por ONVIF y, si no responde, recorre la red local.
+## Panel de cámara
+
+Abre `http://<ip-de-la-pc>:8770` desde el iPhone o desde la PC. En el iPhone, en Safari, toca Compartir → **Añadir a pantalla de inicio** para usarlo como una app.
+
+Funciones:
+
+- Video en calidad alta (1080p) o baja (360p), con tres niveles de consumo de datos: Fluido, Medio (6 imágenes por segundo) y Mínimo (3 por segundo). La página muestra una estimación de MB por hora.
+- Modo **Ahorro (beta)**: HLS con el video original de la cámara sin recodificar y audio AAC. Solo en Safari. Tarda unos 10 s en arrancar y consume lo mismo que la cámara emite (~100 kbps en baja).
+- Sonido del micrófono de la cámara.
+- Fotos (guardadas en `Imágenes\CamaraWifi`) y clips MP4 de 15 s a 10 min (`Vídeos\CamaraWifi`), con galería para ver, descargar y borrar.
+- Movimiento en 8 direcciones manteniendo pulsado, arrastrando sobre el video (opcional) o con las flechas del teclado; barrido automático horizontal o vertical.
+- Información de la cámara, sincronización de su hora, reinicio, búsqueda automática de su IP y fijación manual.
+- Estado del servidor, direcciones local y Tailscale, registro y reinicio del servidor.
+
+El servidor corre sin ventana. Un proceso vigilante lo vuelve a abrir si se cierra; `--detener` lo para del todo. Registro en `%APPDATA%\CamaraWifi\servidor.log`.
+
+## Acceso desde fuera de casa
+
+Instala [Tailscale](https://tailscale.com) en la PC y en el iPhone, inicia sesión con la misma cuenta en los dos y abre `http://<ip-tailscale-de-la-pc>:8770` (la IP empieza por `100.`). Escribe siempre `http://`: el servidor no usa HTTPS y el navegador puede intentar cambiarlo. El firewall de Windows debe permitir el programa en redes privadas; Tailscale cuenta como red privada. No abras puertos en el router: ni la cámara ni el servidor piden contraseña.
+
+## Lo que la cámara probada no puede hacer
+
+Comprobado orden por orden con ONVIF: no tiene zoom, ni posiciones guardadas, ni velocidades de movimiento (acepta el valor y lo ignora), ni detección de movimiento por red, ni audio hacia la cámara, ni ajustes de imagen. Entrega su usuario y contraseña de administrador a cualquiera de la red sin autenticar. Otros modelos pueden diferir.
 
 ## Datos de la cámara probada
-- Video H.265: `rtsp://<ip>:554/0/av0` (alta) y `rtsp://<ip>:554/0/av1` (baja).
-- Movimiento: ONVIF `ContinuousMove` y `Stop` en `http://<ip>/onvif/PTZ`, perfil `Profile_1`.
-- No pide contraseña para RTSP ni ONVIF. Otros modelos pueden usar rutas distintas o pedirla, y este programa no la admite por ahora.
 
-**Seguridad:** el servidor no tiene contraseña y estas cámaras suelen no tenerla. No abras sus puertos a internet: cualquiera podría ver y mover la cámara.
+- Video H.265: `rtsp://<ip>:554/0/av0` (alta) y `rtsp://<ip>:554/0/av1` (baja). Audio PCMA 8 kHz en el mismo flujo.
+- Movimiento: ONVIF `ContinuousMove` y `Stop` en `http://<ip>/onvif/PTZ`, perfil `Profile_1`.
+- IP de ejemplo en el código: `192.168.1.100`. Si no responde, el servidor busca la cámara por ONVIF y, si hace falta, recorre la red local; la IP encontrada se guarda en `%APPDATA%\CamaraWifi\config.json`.
 
 ## Pruebas
-- `visor_camara.py --prueba 10 --calidad baja`: conecta y decodifica, sin ventana.
-- `visor_camara.py --prueba-ventana 10`: abre la ventana real.
-- `visor_camara.py --prueba-ptz`: mueve la cámara.
-- `servidor_iphone.py --prueba 6`: decodifica y codifica JPEG, sin abrir el puerto.
 
-## Pendiente
-- Acceso desde fuera de casa por VPN.
-- Correr el servidor en un equipo siempre encendido, sin depender de la PC.
-- Sonido en el iPhone y menor consumo de datos, reenviando el video sin convertirlo.
-
-El servidor corre sin ventana, se reabre solo si se cierra y se detiene con `servidor_iphone.py --detener`.
+- `servidor_iphone.py --prueba-panel 25 --puerto 8796`: arranca el servidor y ejercita todas las rutas contra la cámara real (video, audio, foto, clip, HLS, información). No mueve la cámara.
+- `servidor_iphone.py --prueba 6`: decodifica y codifica JPEG sin abrir el puerto.
+- `visor_camara.py --prueba 10 --calidad baja`, `--prueba-ventana 10`, `--prueba-ptz` (este sí mueve la cámara).

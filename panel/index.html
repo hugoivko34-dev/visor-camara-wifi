@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-title" content="Cámara">
+    <meta name="theme-color" content="#10151c">
+    <link rel="apple-touch-icon" href="/icono.png">
+    <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="stylesheet" href="/panel/style.css">
+    <title>Cámara</title>
+  </head>
+  <body>
+    <header>
+      <h1>◉ Cámara</h1>
+      <span id="status">Conectando…</span>
+    </header>
+    <main>
+      <section class="view">
+        <div class="screen">
+          <img id="video" alt="Video de la cámara">
+          <video id="hls" playsinline muted autoplay hidden></video>
+          <div class="overlay">
+            <span id="live">Conectando…</span>
+            <span id="metrics">—</span>
+          </div>
+          <button id="full" class="corner" aria-label="Pantalla completa">⛶</button>
+        </div>
+        <div class="actions">
+          <button id="sound">♫ Sonido</button>
+          <label>Volumen <input id="volume" type="range" min="0" max="1" step="0.05"></label>
+          <button id="photo">▣ Foto</button>
+          <select id="record" aria-label="Duración de la grabación">
+            <option value="">Grabar…</option>
+            <option value="15">15 s</option>
+            <option value="30">30 s</option>
+            <option value="60">1 min</option>
+            <option value="300">5 min</option>
+            <option value="0">Hasta que detenga</option>
+          </select>
+          <button id="stopRecord" hidden>Detener grabación</button>
+        </div>
+        <div class="settings">
+          <label>Calidad
+            <select id="quality">
+              <option value="baja">Baja</option>
+              <option value="alta">Alta</option>
+            </select>
+          </label>
+          <label>Datos
+            <select id="data">
+              <option value="fluido">Fluido</option>
+              <option value="medio">Medio</option>
+              <option value="minimo">Mínimo</option>
+              <option value="ahorro">Ahorro (beta)</option>
+            </select>
+          </label>
+          <label><input type="checkbox" id="drag"> Arrastrar para mover</label>
+          <span id="estimate">—</span>
+        </div>
+        <div class="pad" aria-label="Controles de movimiento">
+          <button data-x="-0.5" data-y="0.5" aria-label="Arriba izquierda">↖</button>
+          <button data-x="0" data-y="0.5" aria-label="Arriba">▲</button>
+          <button data-x="0.5" data-y="0.5" aria-label="Arriba derecha">↗</button>
+          <button data-x="-0.5" data-y="0" aria-label="Izquierda">◀</button>
+          <button id="halt" aria-label="Detener">■</button>
+          <button data-x="0.5" data-y="0" aria-label="Derecha">▶</button>
+          <button data-x="-0.5" data-y="-0.5" aria-label="Abajo izquierda">↙</button>
+          <button data-x="0" data-y="-0.5" aria-label="Abajo">▼</button>
+          <button data-x="0.5" data-y="-0.5" aria-label="Abajo derecha">↘</button>
+        </div>
+        <div class="sweep">
+          <button id="sweep">Barrido: apagado</button>
+          <select id="axis" aria-label="Eje del barrido">
+            <option value="x">Horizontal</option>
+            <option value="y">Vertical</option>
+          </select>
+          <select id="sweepSec" aria-label="Segundos por tramo">
+            <option>3</option>
+            <option>5</option>
+            <option>8</option>
+            <option>12</option>
+          </select>
+          <span>segundos</span>
+        </div>
+      </section>
+      <nav id="tabs" aria-label="Secciones">
+        <button data-tab="files">Archivos</button>
+        <button data-tab="camera">Cámara</button>
+        <button data-tab="server">Servidor</button>
+        <button data-tab="help">Ayuda</button>
+      </nav>
+      <section id="files" class="panel">
+        <h2>Archivos</h2>
+        <div id="filesList" class="cards"></div>
+      </section>
+      <section id="camera" class="panel" hidden>
+        <h2>Información de cámara</h2>
+        <div id="cameraInfo">Cargando…</div>
+        <div class="row">
+          <button id="syncTime">Sincronizar hora</button>
+          <button id="findCamera">Buscar cámara</button>
+        </div>
+        <div class="row">
+          <input id="ip" placeholder="192.168.1.100" aria-label="Dirección IP">
+          <button id="saveIp">Guardar IP</button>
+        </div>
+        <div class="card">
+          <p>La cámara entrega su usuario y contraseña a cualquiera de la red sin pedir nada.</p>
+          <button id="showSecret">Mostrar credenciales</button>
+          <div id="secrets"></div>
+        </div>
+        <button id="rebootCamera" class="danger">Reiniciar cámara</button>
+      </section>
+      <section id="server" class="panel" hidden>
+        <h2>Servidor</h2>
+        <div id="serverInfo">Cargando…</div>
+        <h3>Registro</h3>
+        <pre id="log"></pre>
+        <button id="refreshLog">Actualizar</button>
+        <button id="restartServer" class="danger">Reiniciar servidor</button>
+      </section>
+      <section id="help" class="panel" hidden>
+        <h2>Ayuda</h2>
+        <p>En iPhone, abre el menú Compartir de Safari y elige “Añadir a pantalla de inicio”.</p>
+        <p>Tailscale crea una conexión privada entre tus dispositivos. Instálalo en la PC y el iPhone con la misma cuenta y abre la dirección Tailscale del servidor.</p>
+        <p>Fluido envía todos los fotogramas; Medio limita a 6 fps; Mínimo limita a 3 fps. Ahorro usa HLS en Safari.</p>
+        <p>En escritorio usa las flechas para mover y espacio para detener. La cámara no tiene zoom, presets, detección de movimiento ni función para hablar.</p>
+      </section>
+    </main>
+    <div id="toast" role="status"></div>
+    <dialog id="viewer">
+      <button id="closeViewer">Cerrar</button>
+      <div id="viewerContent"></div>
+    </dialog>
+    <script src="/panel/app.js" defer></script>
+  </body>
+</html>
