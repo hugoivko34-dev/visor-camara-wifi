@@ -732,7 +732,7 @@ def prueba_panel(seconds, port):
                 except socket.timeout: continue
             sock.close()
             count = data.count(b"image/jpeg")
-            resultados["stream_jpegs"] = count
+            resultados["stream_jpegs_n"] = count
             return 15 <= count <= 40
         check("stream_jpegs", stream_check)
         def audio_check():

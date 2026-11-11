@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import socket
+import subprocess
 import threading
 import time
 import urllib.error
@@ -142,6 +143,7 @@ def soap(move=None, timeout=3):
 
 def discover_camera(timeout=3.5):
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    interfaces = ips_locales() or [None]
     try:
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
         start = time.monotonic()
@@ -158,7 +160,11 @@ def discover_camera(timeout=3.5):
                          + '</w:MessageID><w:To>urn:schemas-xmlsoap-org:ws:2005:04:discovery</w:To>'
                          '<w:Action>http://schemas.xmlsoap.org/ws/2005/04/discovery/Probe</w:Action></e:Header>'
                          '<e:Body><d:Probe><d:Types>dn:NetworkVideoTransmitter</d:Types></d:Probe></e:Body></e:Envelope>').encode()
-                sock.sendto(probe, ("239.255.255.250", 3702))
+                for interfaz in interfaces:
+                    # Sin esto Windows envía la consulta por la interfaz de Tailscale y la cámara no la ve
+                    if interfaz:
+                        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(interfaz))
+                    sock.sendto(probe, ("239.255.255.250", 3702))
                 probes_sent += 1
                 next_probe = start + probes_sent * 0.6
             sock.settimeout(max(0.01, min(0.2, end - time.monotonic(), next_probe - time.monotonic()
@@ -188,6 +194,87 @@ def discover_camera(timeout=3.5):
     return None
 
 
+_RED_EXCLUIDA = (ipaddress.ip_network("100.64.0.0/10"), ipaddress.ip_network("169.254.0.0/16"),
+                 ipaddress.ip_network("127.0.0.0/8"))
+
+
+def ips_locales():
+    """IPv4 de la PC en redes de casa. Tailscale (100.64.0.0/10) queda fuera: desde que se
+    instaló, Windows la devuelve primero y la búsqueda barría la red equivocada."""
+    candidatas = []
+    try:
+        sonda = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sonda.connect(("192.0.2.1", 80))
+            candidatas.append(sonda.getsockname()[0])
+        finally:
+            sonda.close()
+    except OSError:
+        pass
+    try:
+        candidatas += [info[4][0] for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)]
+    except OSError:
+        pass
+    resultado = []
+    for ip in candidatas:
+        try:
+            direccion = ipaddress.IPv4Address(ip)
+        except ValueError:
+            continue
+        if not direccion.is_private or any(direccion in red for red in _RED_EXCLUIDA):
+            continue
+        if ip not in resultado:
+            resultado.append(ip)
+    return resultado
+
+
+def _tabla_arp():
+    """{ip: mac} de la tabla ARP de Windows, con la MAC en minúsculas y guiones."""
+    try:
+        salida = subprocess.run(["arp", "-a"], capture_output=True, text=True, timeout=3,
+                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    tabla = {}
+    for ip, mac in re.findall(r"(\d+\.\d+\.\d+\.\d+)\s+([0-9a-fA-F]{2}(?:[-:][0-9a-fA-F]{2}){5})", salida):
+        tabla[ip] = mac.lower().replace(":", "-")
+    return tabla
+
+
+def _leer_config():
+    try:
+        config = json.loads(ruta_configuracion().read_text(encoding="utf-8"))
+        return config if isinstance(config, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def recordar_mac(ip):
+    """Guarda la MAC de la cámara (la real, de la tabla ARP) para encontrarla al instante si cambia de IP."""
+    mac = _tabla_arp().get(ip)
+    if not mac or _leer_config().get("mac") == mac:
+        return
+    ruta = ruta_configuracion()
+    try:
+        config = _leer_config()
+        config["mac"] = mac
+        ruta.parent.mkdir(parents=True, exist_ok=True)
+        ruta.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def buscar_por_mac():
+    """La cámara cambia de IP pero no de MAC: si la tabla ARP la conoce, la encuentra en milisegundos."""
+    mac = _leer_config().get("mac")
+    if not mac:
+        return None
+    for ip, mac_tabla in _tabla_arp().items():
+        if mac_tabla == mac and camera_port_responds(ip):
+            return ip
+    return None
+
+
 def camera_port_responds(ip):
     try:
         with socket.create_connection((ip, 554), timeout=1.5):
@@ -198,11 +285,13 @@ def camera_port_responds(ip):
 
 def scan_for_camera():
     try:
-        own_ip = socket.gethostbyname(socket.gethostname())
-        if own_ip == "127.0.0.1":
+        propias = ips_locales()
+        if not propias:
             return None
-        subnet = ".".join(own_ip.split(".")[:3])
-        candidates = [f"{subnet}.{host}" for host in range(1, 255) if f"{subnet}.{host}" != own_ip]
+        candidates = []
+        for own_ip in propias:
+            subnet = ".".join(own_ip.split(".")[:3])
+            candidates += [f"{subnet}.{host}" for host in range(1, 255) if f"{subnet}.{host}" not in propias]
 
         def check(candidate):
             try:
@@ -227,7 +316,7 @@ def scan_for_camera():
 
 
 def find_camera():
-    return discover_camera() or scan_for_camera()
+    return buscar_por_mac() or discover_camera() or scan_for_camera()
 
 
 def buscar_ahora():
@@ -246,7 +335,7 @@ def discover_camera_if_due():
         return None
     with _lock_busqueda:
         now = time.monotonic()
-        if now - _ultima_busqueda < 15:
+        if now - _ultima_busqueda < 8:
             return None
         _ultima_busqueda = now
     found = find_camera()
@@ -259,13 +348,15 @@ def discover_camera_if_due():
 def camera_watchdog(stop_event, on_found=None):
     while not stop_event.is_set():
         try:
-            if not camera_port_responds(ip_actual()):
+            if camera_port_responds(ip_actual()):
+                recordar_mac(ip_actual())
+            else:
                 found = discover_camera_if_due()
                 if found and on_found:
                     on_found(found)
         except Exception:
             pass
-        stop_event.wait(30)
+        stop_event.wait(10)
 
 
 def info_dispositivo():

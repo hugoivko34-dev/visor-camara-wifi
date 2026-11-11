@@ -15,9 +15,15 @@ from datetime import datetime
 from pathlib import Path
 
 URLS = {"baja": "/0/av1", "alta": "/0/av0"}
+# Calidades que se mantienen conectadas aunque nadie mire: la imagen está lista al abrir
+# la página en vez de esperar ~2,3 s al siguiente fotograma completo de la cámara.
+PRECALENTAR = {"baja"}
 OPTIONS = {"rtsp_transport": "tcp", "fflags": "nobuffer", "flags": "low_delay", "max_delay": "0", "timeout": "5000000", "analyzeduration": "0", "probesize": "32768"}
 BOUNDARY = "fotograma"
 _obtener_ip = lambda: "192.168.1.100"
+# Los hilos de video esperan a que el servidor les diga la IP real; si no, el primer intento
+# va a la IP de ejemplo y la imagen tarda 5 s más en aparecer al arrancar.
+_configurado = threading.Event()
 _write_log = print
 _streams = {}
 _recording = None
@@ -34,6 +40,7 @@ def configurar(obtener_ip=None, write_log=None):
     global _obtener_ip, _write_log
     if obtener_ip is not None:
         _obtener_ip = obtener_ip
+        _configurado.set()
     if write_log is not None:
         _write_log = write_log
 
@@ -71,11 +78,12 @@ class Stream:
         self.thread.start()
 
     def run(self):
+        _configurado.wait()
         delay = 1
         idle_since = None
         while not self.stop.is_set():
             with self.lock:
-                needed = self.clients > 0 or len(self.audio_queues) > 0 or _is_recording(self.quality) or self.quality in _hls
+                needed = self.quality in PRECALENTAR or self.clients > 0 or len(self.audio_queues) > 0 or _is_recording(self.quality) or self.quality in _hls
                 self.active = needed
                 if not needed:
                     if idle_since is None:
@@ -106,7 +114,7 @@ class Stream:
                         self.reconnect.clear()
                         break
                     with self.lock:
-                        needed = self.clients > 0 or len(self.audio_queues) > 0 or _is_recording(self.quality) or self.quality in _hls
+                        needed = self.quality in PRECALENTAR or self.clients > 0 or len(self.audio_queues) > 0 or _is_recording(self.quality) or self.quality in _hls
                     if not needed and idle_since is None:
                         idle_since = time.monotonic()
                     if idle_since and time.monotonic() - idle_since >= 5:
@@ -158,7 +166,7 @@ class Stream:
                 with self.lock:
                     self.connected = bool(got_frame and (self.clients or self.audio_queues))
                     self.lock.notify_all()
-            if self.clients or self.audio_queues:
+            if self.quality in PRECALENTAR or self.clients or self.audio_queues:
                 self.reconnect.wait(delay)
                 delay = min(delay + 1, 10)
 
